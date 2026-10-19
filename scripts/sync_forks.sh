@@ -40,7 +40,8 @@ export GH_TOKEN
 
 REPORT_FILE="$(mktemp)"
 FORKS_FILE="$(mktemp)"
-trap 'rm -f "$REPORT_FILE" "$FORKS_FILE"' EXIT
+CMP_ERR_FILE="$(mktemp)"
+trap 'rm -f "$REPORT_FILE" "$FORKS_FILE" "$CMP_ERR_FILE"' EXIT
 
 # ---------- 汇总报告辅助 ----------
 # report <fork> <upstream> <result> <detail>
@@ -70,14 +71,16 @@ finish_summary() {
   } >> "$SUMMARY"
 }
 
-# compare_fork <fork> <fork_branch> <parent> <parent_branch>
-# 输出 "status behind ahead"；连续 3 次失败返回非零（应对偶发 5xx/网络抖动）
+# compare_fork <fork> <fork_branch> <parent_owner> <parent_branch>
+# 注意：head 只接受「上游owner:分支」格式，带仓库名（owner/repo:branch）会 404
+# 输出 "status behind ahead"；连续 3 次失败返回非零（应对偶发 5xx/网络抖动），
+# 最后一次错误信息留在 CMP_ERR_FILE 供报告使用
 compare_fork() {
   local out=""
   local attempt
   for attempt in 1 2 3; do
     if out="$(gh api "repos/$1/compare/$2...$3:$4" \
-              --jq '[.status, (.behind_by|tostring), (.ahead_by|tostring)] | @tsv' 2>/dev/null)"; then
+              --jq '[.status, (.behind_by|tostring), (.ahead_by|tostring)] | @tsv' 2>"$CMP_ERR_FILE")"; then
       printf '%s\n' "$out"
       return 0
     fi
@@ -137,12 +140,14 @@ while IFS= read -r FORK; do
     continue
   fi
   [ "${PARENT_BRANCH:-NONE}" = "NONE" ] && PARENT_BRANCH="$BRANCH"
+  # compare 的 head 只认「上游owner:分支」，不能带仓库名（owner/repo:branch 会 404）
+  PARENT_OWNER="${PARENT%%/*}"
 
   log "    默认分支 ${BRANCH}，上游 ${PARENT}:${PARENT_BRANCH}"
 
-  if ! CMP="$(compare_fork "$FORK" "$BRANCH" "$PARENT" "$PARENT_BRANCH")"; then
+  if ! CMP="$(compare_fork "$FORK" "$BRANCH" "$PARENT_OWNER" "$PARENT_BRANCH")"; then
     FAILED=$((FAILED+1))
-    report "$FORK" "$PARENT" "❌ 失败" "compare 接口连续失败（上游分支不存在或无访问权限）"
+    report "$FORK" "$PARENT" "❌ 失败" "compare 失败：$(head -1 "$CMP_ERR_FILE" | cut -c1-80)"
     continue
   fi
   IFS=$'\t' read -r STATUS BEHIND AHEAD <<< "$CMP"
