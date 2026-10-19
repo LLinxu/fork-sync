@@ -93,14 +93,10 @@ if ! LOGIN="$(gh api user --jq '.login' 2>/dev/null)"; then
 fi
 log "==> 当前账号：${LOGIN}"
 
-# affiliation=owner 只列自己账号下的仓库；fork=true 过滤出 fork；--paginate 自动翻页
-# 注意：parent 缺失时用 "NONE" 占位而不是空串——IFS 制表符会被 read 当作空白折叠，
-# 空字段会导致后续列整体错位（本地 mock 测试实测过这个坑）
+# 先只列出 fork 的完整名：user/repos 列表接口不返回 parent/source 字段
+# （实测列表里 parent 恒为 null，上游信息必须在下面逐个仓库获取）
 if ! gh api "user/repos?affiliation=owner&per_page=100" --paginate \
-     --jq '.[] | select(.fork == true)
-            | [.full_name, .default_branch,
-               (.parent.full_name // "NONE"), (.parent.default_branch // ""),
-               (.archived | tostring)] | @tsv' > "$FORKS_FILE" 2>/dev/null; then
+     --jq '.[] | select(.fork == true) | .full_name' > "$FORKS_FILE" 2>/dev/null; then
   err "列出仓库失败（API 限流或网络问题），请稍后重试或查看 Actions 日志"
   exit 1
 fi
@@ -110,12 +106,25 @@ log "==> 共发现 ${TOTAL} 个 fork 仓库"
 
 SYNCED=0; UPTODATE=0; SKIPPED=0; MANUAL=0; FAILED=0
 
-# ---------- 2. 逐个对比并同步 ----------
-while IFS=$'\t' read -r FORK BRANCH PARENT PARENT_BRANCH ARCHIVED; do
+# ---------- 2. 逐个获取上游信息、对比并同步 ----------
+while IFS= read -r FORK; do
   [ -z "${FORK:-}" ] && continue
+  log "--> ${FORK}"
+
+  # 逐个获取仓库详情：只有单仓库接口才返回 parent（上游）信息
+  # 注意：字段一律用 "NONE" 占位而非空串——IFS 制表符会被 read 当作空白折叠，
+  # 空字段会导致后续列整体错位（本地 mock 测试实测过这个坑）
+  if ! DETAIL="$(gh api "repos/$FORK" \
+                 --jq '[.default_branch, (.parent.full_name // "NONE"),
+                        (.parent.default_branch // "NONE"), (.archived | tostring)] | @tsv' 2>/dev/null)"; then
+    FAILED=$((FAILED+1))
+    report "$FORK" "-" "❌ 失败" "获取仓库详情失败（无访问权限或接口异常）"
+    continue
+  fi
+  IFS=$'\t' read -r BRANCH PARENT PARENT_BRANCH ARCHIVED <<< "$DETAIL"
   [ -z "${BRANCH:-}" ] && BRANCH="main"
 
-  # 上游已被删除或转为不可见（jq 侧以 "NONE" 占位，正常仓库名必含 "/" 不会冲突）
+  # 上游已被删除或转为不可见
   if [ "${PARENT:-NONE}" = "NONE" ]; then
     SKIPPED=$((SKIPPED+1))
     report "$FORK" "-" "⏭️ 跳过" "未找到上游仓库（已删除或转为私有）"
@@ -127,9 +136,9 @@ while IFS=$'\t' read -r FORK BRANCH PARENT PARENT_BRANCH ARCHIVED; do
     report "$FORK" "$PARENT" "⏭️ 跳过" "仓库已归档，无法同步"
     continue
   fi
-  [ -z "${PARENT_BRANCH:-}" ] && PARENT_BRANCH="$BRANCH"
+  [ "${PARENT_BRANCH:-NONE}" = "NONE" ] && PARENT_BRANCH="$BRANCH"
 
-  log "--> ${FORK}（默认分支 ${BRANCH}，上游 ${PARENT}:${PARENT_BRANCH}）"
+  log "    默认分支 ${BRANCH}，上游 ${PARENT}:${PARENT_BRANCH}"
 
   if ! CMP="$(compare_fork "$FORK" "$BRANCH" "$PARENT" "$PARENT_BRANCH")"; then
     FAILED=$((FAILED+1))
