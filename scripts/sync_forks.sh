@@ -4,8 +4,9 @@
 #
 # 工作流程：
 #   1. 通过 GitHub REST API 列出当前账号拥有（affiliation=owner）的全部 fork 仓库
-#   2. 用 compare 接口把每个 fork 的默认分支与上游默认分支对比
-#      （跨仓库对比语法：fork分支...上游owner:上游分支，同一仓库网络内有效）
+#   2. 用 compare 接口把上游默认分支与每个 fork 的默认分支对比
+#      （跨仓库对比语法：上游owner:上游分支...fork分支，同一仓库网络内有效；
+#       base=上游、head=fork，status 描述 fork 相对上游的位置）
 #   3. 落后（behind）时调用官方 merge-upstream 接口执行同步
 #      （即 GitHub 网页端「Sync fork」按钮背后的 API）
 #   4. 汇总报告写入 GITHUB_STEP_SUMMARY；仅当出现真实错误时以非零码退出
@@ -72,14 +73,21 @@ finish_summary() {
 }
 
 # compare_fork <fork> <fork_branch> <parent_owner> <parent_branch>
-# 注意：head 只接受「上游owner:分支」格式，带仓库名（owner/repo:branch）会 404
+# compare 语义：base...head，status/ahead_by/behind_by 描述 head（fork 分支）
+# 相对 base（上游分支）的位置：
+#   behind    = fork 落后上游，behind_by 为缺少的提交数 → 需要 merge-upstream
+#   ahead     = fork 领先上游，上游无新提交 → 无需同步
+#   diverged  = 双方各有独立提交 → 需人工处理
+#   identical = 完全一致
+# 注意：base 侧的跨仓库写法必须是「上游owner:分支」，
+# 带仓库名（owner/repo:branch）会 404
 # 输出 "status behind ahead"；连续 3 次失败返回非零（应对偶发 5xx/网络抖动），
 # 最后一次错误信息留在 CMP_ERR_FILE 供报告使用
 compare_fork() {
   local out=""
   local attempt
   for attempt in 1 2 3; do
-    if out="$(gh api "repos/$1/compare/$2...$3:$4" \
+    if out="$(gh api "repos/$1/compare/$3:$4...$2" \
               --jq '[.status, (.behind_by|tostring), (.ahead_by|tostring)] | @tsv' 2>"$CMP_ERR_FILE")"; then
       printf '%s\n' "$out"
       return 0
@@ -140,7 +148,7 @@ while IFS= read -r FORK; do
     continue
   fi
   [ "${PARENT_BRANCH:-NONE}" = "NONE" ] && PARENT_BRANCH="$BRANCH"
-  # compare 的 head 只认「上游owner:分支」，不能带仓库名（owner/repo:branch 会 404）
+  # compare 的 base（上游侧）只认「owner:分支」，不能带仓库名（owner/repo:branch 会 404）
   PARENT_OWNER="${PARENT%%/*}"
 
   log "    默认分支 ${BRANCH}，上游 ${PARENT}:${PARENT_BRANCH}"

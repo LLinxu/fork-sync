@@ -28,8 +28,8 @@ fork-sync/
 ① 用 PAT 调 GET /user/repos?affiliation=owner&fork=true，列出账号下所有 fork
    │
    ▼
-② 对每个 fork 调 compare 接口：
-   repos/{fork}/compare/{fork默认分支}...{上游owner}:{上游默认分支}
+② 对每个 fork 调 compare 接口（base=上游、head=fork）：
+   repos/{fork}/compare/{上游owner}:{上游默认分支}...{fork默认分支}
    │
    ├─ identical / ahead ──► 无需同步，记录 ✅
    ├─ behind ───────────► ③ 调 POST /repos/{fork}/merge-upstream 同步
