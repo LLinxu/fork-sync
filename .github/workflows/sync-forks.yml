@@ -1,0 +1,43 @@
+name: Fork Daily Sync
+
+on:
+  schedule:
+    # 每天北京时间 02:20 自动同步（timezone 为 GitHub 2026-03 起支持的 IANA 时区字段）
+    # 特意避开整点：官方指出整点是定时任务高峰，容易延迟甚至被丢弃
+    - cron: '20 2 * * *'
+      timezone: "Asia/Shanghai"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "演练模式：只对比上游、不执行合并"
+        type: boolean
+        default: false
+
+# 同一时间只允许一个同步任务，避免手动触发与定时任务叠加重复合并
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+# 对本仓库只需读权限；跨仓库同步统一走 FORK_SYNC_PAT（GITHUB_TOKEN 无权访问其他仓库）
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync all forks with upstream
+    runs-on: ubuntu-latest
+    # 60 分钟足够覆盖约 1000+ 个 fork 的顺序同步；硬上限为 6 小时
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run fork sync
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PAT }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+          # 可在 Settings → Secrets and variables → Actions → Variables 里改为 false 关闭保活
+          KEEPALIVE: ${{ vars.KEEPALIVE || 'true' }}
+        run: bash scripts/sync_forks.sh
